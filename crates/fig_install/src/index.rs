@@ -40,21 +40,26 @@ use url::Url;
 
 use crate::Error;
 
-const DEFAULT_RELEASE_URL: &str = "https://desktop-release.q.us-east-1.amazonaws.com";
+/// Empty means the updater is disabled. Bay has no release server of its own yet.
+const DEFAULT_RELEASE_URL: &str = "";
 
 /// The url to check for updates from, tries the following order:
 /// - The env var `BAY_DESKTOP_RELEASE_URL`
 /// - The setting `install.releaseUrl`
 /// - Falls back to the default or the build time env var `BAY_BUILD_DESKTOP_RELEASE_URL`
-static RELEASE_URL: LazyLock<Url> = LazyLock::new(|| {
-    match fig_os_shim::Env::new().bay_desktop_release_url() {
-        Ok(s) => Url::parse(&s),
+///
+/// `None` when the resolved value is empty, which disables update checks.
+static RELEASE_URL: LazyLock<Option<Url>> = LazyLock::new(|| {
+    let s = match fig_os_shim::Env::new().bay_desktop_release_url() {
+        Ok(s) => s,
         Err(_) => match fig_settings::settings::get_string("install.releaseUrl") {
-            Ok(Some(s)) => Url::parse(&s),
-            _ => Url::parse(option_env!("BAY_BUILD_DESKTOP_RELEASE_URL").unwrap_or(DEFAULT_RELEASE_URL)),
+            Ok(Some(s)) => s,
+            _ => option_env!("BAY_BUILD_DESKTOP_RELEASE_URL")
+                .unwrap_or(DEFAULT_RELEASE_URL)
+                .to_owned(),
         },
-    }
-    .unwrap()
+    };
+    (!s.trim().is_empty()).then(|| Url::parse(&s).unwrap())
 });
 
 fn deser_enum_other<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -354,7 +359,8 @@ pub struct Package {
 
 impl Package {
     pub(crate) fn download_url(&self) -> Url {
-        let mut url = RELEASE_URL.clone();
+        // Packages only come from an index fetched by `pull`, which fails when the updater is disabled.
+        let mut url = RELEASE_URL.clone().expect("updater is disabled");
         url.set_path(&self.download);
         url
     }
@@ -406,16 +412,19 @@ impl PackageArchitecture {
     }
 }
 
-fn index_endpoint(_channel: &Channel) -> Url {
-    let mut url = RELEASE_URL.clone();
+fn index_endpoint(_channel: &Channel) -> Option<Url> {
+    let mut url = RELEASE_URL.clone()?;
     url.set_path("index.json");
-    url
+    Some(url)
 }
 
 pub async fn pull(channel: &Channel) -> Result<Index, Error> {
+    let Some(endpoint) = index_endpoint(channel) else {
+        return Err(Error::UpdateFailed("updater is disabled, no release URL set".into()));
+    };
     let response = fig_request::client()
         .expect("Unable to create HTTP client")
-        .get(index_endpoint(channel))
+        .get(endpoint)
         .send()
         .await?;
     let index = response.json().await?;

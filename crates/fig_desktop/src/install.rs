@@ -193,7 +193,10 @@ async fn initialize_fig_dir() -> anyhow::Result<()> {
         CLI_BINARY_NAME,
         PTY_BINARY_NAME,
     };
-    use fig_util::directories::home_dir;
+    use fig_util::directories::{
+        fig_data_dir,
+        home_dir,
+    };
     use fig_util::launchd_plist::{
         LaunchdPlist,
         create_launch_agent,

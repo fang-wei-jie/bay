@@ -69,11 +69,19 @@ export default function OnboardingModal() {
     advance();
   }
 
-  if (
-    platformInfo &&
-    !matchesPlatformRestrictions(platformInfo, check.platformRestrictions)
-  ) {
-    setStep(step + 1);
+  // Skip steps for other platforms. Goes through advance() so skipping the
+  // last step finishes onboarding instead of indexing past the end.
+  const skipStep =
+    !!platformInfo &&
+    !matchesPlatformRestrictions(platformInfo, check.platformRestrictions);
+
+  useEffect(() => {
+    if (skipStep) advance();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [skipStep, step]);
+
+  if (skipStep) {
+    return null;
   }
 
   if (check.id === "welcome") {
