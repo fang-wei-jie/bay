@@ -10,10 +10,10 @@ let runCommand = function (command) {
 };
 
 let config = vscode.workspace.getConfiguration();
-// fig.log is an internal setting as it's intended for developers only, this means it won't show up
-// in the settings UI/editor. Add `"fig.log": true` to your settings.json and reload the window to
+// bay.log is an internal setting as it's intended for developers only, this means it won't show up
+// in the settings UI/editor. Add `"bay.log": true` to your settings.json and reload the window to
 // enable logging.
-let shouldLog = config.get("q.log") === true;
+let shouldLog = config.get("bay.log") === true;
 
 // Ensure that any VSCode terminal session has BAY_NEW_SESSION set as an environment variable
 let osxEnv = config.get("terminal.integrated.env.osx");
@@ -22,12 +22,12 @@ config.update("terminal.integrated.env.osx", osxEnv, true);
 
 function log(...args) {
   if (shouldLog) {
-    console.log(`q: ${args[0]}`, args.slice(1));
+    console.log(`bay: ${args[0]}`, args.slice(1));
   }
 }
 
 function logError(message) {
-  console.error(`q: ${message}`);
+  console.error(`bay: ${message}`);
 }
 
 function updateActiveTerminal(terminal) {
@@ -40,7 +40,7 @@ function updateActiveTerminal(terminal) {
   activeTerminal.processId.then((processId) => {
     if (processId) {
       runCommand(
-        `q hook keyboard-focus-changed ${vscode.env.uriScheme} ${processId}`,
+        `bay hook keyboard-focus-changed ${vscode.env.uriScheme} ${processId}`,
       );
     }
   });
@@ -76,7 +76,7 @@ function activate() {
     });
 
     vscode.window.onDidChangeTextEditorSelection(() => {
-      runCommand(`q hook keyboard-focus-changed ${vscode.env.uriScheme} 0`);
+      runCommand(`bay hook keyboard-focus-changed ${vscode.env.uriScheme} 0`);
     });
   } catch (e) {
     logError(e);
