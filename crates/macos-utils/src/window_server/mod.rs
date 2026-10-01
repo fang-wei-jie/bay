@@ -80,6 +80,8 @@ const BLOCKED_BUNDLE_IDS: &[&str] = &[
     "com.apple.controlcenter",
     "com.mschrage.fig",
     "com.amazon.codewhisperer",
+    // Bay's own windows (autocomplete popup, dashboard) must not count as leaving the terminal.
+    "org.siriuscrain.bay",
 ];
 
 // TODO: -- should this use fig_util crate Terminal struct?
