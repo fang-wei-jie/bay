@@ -1,28 +1,14 @@
 use std::borrow::Cow;
-use std::sync::{
-    Arc,
-    LazyLock,
-};
+use std::io::ErrorKind;
+use std::sync::Arc;
 
-use anyhow::Result;
 use fig_os_shim::Context;
-use fig_request::reqwest::Client;
-use fnv::FnvHashSet;
-use futures::prelude::*;
-use serde::{
-    Deserialize,
-    Serialize,
+use tracing::{
+    debug,
+    error,
 };
-use tokio::sync::{
-    MappedMutexGuard,
-    Mutex,
-    MutexGuard,
-};
-use tracing::error;
-use url::Url;
 use wry::http::header::CONTENT_TYPE;
 use wry::http::{
-    HeaderValue,
     Request,
     Response,
     StatusCode,
@@ -30,186 +16,58 @@ use wry::http::{
 
 use crate::webview::WindowId;
 
-const APPLICATION_JAVASCRIPT: HeaderValue = HeaderValue::from_static("application/javascript");
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CdnSource {
-    url: Url,
+fn res(status: StatusCode, content_type: &'static str, body: Cow<'static, [u8]>) -> Response<Cow<'static, [u8]>> {
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, content_type)
+        .body(body)
+        .unwrap()
 }
-
-static CDNS: LazyLock<Vec<CdnSource>> = LazyLock::new(|| {
-    vec![CdnSource {
-        url: "https://specs.q.us-east-1.amazonaws.com".try_into().unwrap(),
-    }]
-});
 
 fn res_404() -> Response<Cow<'static, [u8]>> {
-    Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .header(CONTENT_TYPE, "text/plain")
-        .body(b"Not Found".as_ref().into())
-        .unwrap()
+    res(StatusCode::NOT_FOUND, "text/plain", b"Not Found".as_ref().into())
 }
 
-fn res_ok(bytes: Vec<u8>, content_type: HeaderValue) -> Response<Cow<'static, [u8]>> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, content_type)
-        .body(bytes.into())
-        .unwrap()
-}
-
-#[derive(Debug, Clone)]
-struct SpecIndexMeta {
-    cdn_source: CdnSource,
-    spec_index: SpecIndex,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SpecIndex {
-    completions: Vec<String>,
-    diff_versioned_completions: Vec<String>,
-}
-
-static INDEX_CACHE: Mutex<Option<Vec<Result<SpecIndexMeta>>>> = Mutex::const_new(None);
-
-async fn remote_index_json(client: &Client) -> MappedMutexGuard<'_, Vec<Result<SpecIndexMeta>>> {
-    let mut cache = INDEX_CACHE.lock().await;
-
-    if cache.is_none() {
-        *cache = Some(
-            future::join_all(CDNS.iter().map(|cdn_source| async move {
-                let mut url = cdn_source.url.clone();
-                url.set_path("index.json");
-
-                let response = match client.get(url).send().await.and_then(|r| r.error_for_status()) {
-                    Ok(response) => response,
-                    Err(err) => {
-                        error!(%err, "Failed to fetch spec index");
-                        return Some(Err(err.into()));
-                    },
-                };
-
-                let spec_index = match response.json().await {
-                    Ok(s) => s,
-                    Err(s) => {
-                        error!(%s, "Failed to parse spec index");
-                        return Some(Err(s.into()));
-                    },
-                };
-
-                Some(Ok(SpecIndexMeta {
-                    cdn_source: cdn_source.clone(),
-                    spec_index,
-                }))
-            }))
-            .await
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>(),
-        );
-    }
-
-    MutexGuard::map(cache, |cache| cache.as_mut().unwrap())
-}
-
-async fn merged_index_json(client: &Client) -> Result<SpecIndex> {
-    let mut completions = FnvHashSet::default();
-    let mut diff_versioned_completions = FnvHashSet::default();
-
-    for res in remote_index_json(client).await.iter() {
-        match res {
-            Ok(meta) => {
-                completions.extend(meta.spec_index.completions.clone());
-                diff_versioned_completions.extend(meta.spec_index.diff_versioned_completions.clone());
-            },
-            Err(err) => {
-                tracing::error!(%err, "failed to fetch spec index");
-            },
-        }
-    }
-
-    let mut completions: Vec<_> = completions.into_iter().collect();
-    completions.sort();
-
-    let mut diff_versioned_completions: Vec<_> = diff_versioned_completions.into_iter().collect();
-    diff_versioned_completions.sort();
-
-    Ok(SpecIndex {
-        completions,
-        diff_versioned_completions,
-    })
-}
-
-// handle `spec://localhost/spec.js`
+/// Serves completion specs from the local specs dir, there is no remote CDN.
+///
+/// The dir holds the `build/` output of the `@withfig/autocomplete` package
+/// (`index.json` plus one `.js` file or folder per spec), see `scripts/update-specs.sh`.
+///
+/// handle `spec://localhost/index.json` and `spec://localhost/{spec}.js`
 pub async fn handle(
     _ctx: Arc<Context>,
     request: Request<Vec<u8>>,
     _: WindowId,
 ) -> anyhow::Result<Response<Cow<'static, [u8]>>> {
-    let Some(client) = fig_request::client() else {
-        return Ok(res_404());
+    let specs_dir = match fig_util::directories::autocomplete_specs_dir().and_then(|dir| Ok(dir.canonicalize()?)) {
+        Ok(dir) => dir,
+        Err(err) => {
+            error!(%err, "specs dir is missing, run scripts/update-specs.sh");
+            return Ok(res_404());
+        },
     };
 
-    let path = request.uri().path();
+    let uri_path = percent_encoding::percent_decode_str(request.uri().path()).decode_utf8()?;
+    let relative = uri_path.trim_start_matches('/');
 
-    if path == "/index.json" {
-        let index = merged_index_json(client).await?;
-        Ok(res_ok(
-            serde_json::to_vec(&index)?,
-            "application/json".try_into().unwrap(),
-        ))
-    } else {
-        // default to trying the first cdn
-        let mut cdn_source = CDNS[0].clone();
+    let path = match specs_dir.join(relative).canonicalize() {
+        Ok(path) => path,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            debug!(%uri_path, "spec not found");
+            return Ok(res_404());
+        },
+        Err(err) => return Err(err.into()),
+    };
 
-        let spec_name = path.strip_prefix('/').unwrap_or(path);
-        let spec_name = spec_name.strip_suffix(".js").unwrap_or(spec_name);
-
-        for meta in remote_index_json(client).await.iter().skip(1).flatten() {
-            if meta
-                .spec_index
-                .completions
-                .binary_search_by(|name| name.as_str().cmp(spec_name))
-                .is_ok()
-            {
-                cdn_source = meta.cdn_source.clone();
-                break;
-            }
-        }
-
-        let mut url = cdn_source.url.clone();
-        url.set_path(path);
-
-        let response = client.get(url).send().await?.error_for_status()?;
-
-        let content_type = response
-            .headers()
-            .get(http::header::CONTENT_TYPE)
-            .cloned()
-            .unwrap_or(APPLICATION_JAVASCRIPT);
-
-        Ok(res_ok(
-            response.bytes().await?.to_vec(),
-            content_type.as_bytes().try_into()?,
-        ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cdns() {
-        println!("{:?}", *CDNS);
+    // dont allow escaping the specs dir
+    if !path.starts_with(&specs_dir) || !path.is_file() {
+        return Ok(res_404());
     }
 
-    #[tokio::test]
-    async fn test_index_json() {
-        let client = Client::new();
-        let index = remote_index_json(&client).await;
-        println!("{index:?}");
-    }
+    let content_type = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => "application/json",
+        _ => "application/javascript",
+    };
+
+    Ok(res(StatusCode::OK, content_type, tokio::fs::read(&path).await?.into()))
 }

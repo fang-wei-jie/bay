@@ -3,7 +3,6 @@ import * as semver from "semver";
 import {
   ensureTrailingSlash,
   withTimeout,
-  exponentialBackoff,
 } from "@aws/amazon-q-developer-cli-shared/utils";
 import {
   executeCommand,
@@ -23,15 +22,6 @@ export type SpecFileImport =
       default: Fig.Subcommand;
       versions: Fig.VersionDiffMap;
     };
-
-const makeCdnUrlFactory =
-  (baseUrl: string) =>
-  (specName: string, ext: string = "js") =>
-    `${baseUrl}${specName}.${ext}`;
-
-const cdnUrlFactory = makeCdnUrlFactory(
-  "https://specs.q.us-east-1.amazonaws.com/",
-);
 
 const stringImportCache = new Map<string, unknown>();
 
@@ -77,59 +67,28 @@ export async function importSpecFromFile(
   return importString(result);
 }
 
-/**
- * Specs can only be loaded from non "secure" contexts, so we can't load from https
- */
-export const canLoadSpecProtocol = () => window.location.protocol !== "https:";
+// Public specs are served by the desktop app's `spec://` protocol from the local
+// specs dir, there is no remote CDN fallback.
 
 // TODO: this is a problem for diff-versioned specs
 export async function importFromPublicCDN<T = SpecFileImport>(
   name: string,
 ): Promise<T> {
-  if (canLoadSpecProtocol()) {
-    return withTimeout(
+  try {
+    return await withTimeout(
       20000,
       import(
         /* @vite-ignore */
         `spec://localhost/${name}.js`
       ),
     );
-  }
-
-  // Total of retries in the worst case should be close to previous timeout value
-  // 500ms * 2^5 + 5 * 1000ms + 5 * 100ms = 21500ms, before the timeout was 20000ms
-  try {
-    return await exponentialBackoff(
-      {
-        attemptTimeout: 1000,
-        baseDelay: 500,
-        maxRetries: 5,
-        jitter: 100,
-      },
-
-      () => import(/* @vite-ignore */ cdnUrlFactory(name)),
-    );
   } catch {
-    /**/
+    throw new SpecCDNError("Unable to load from the local specs dir");
   }
-
-  throw new SpecCDNError("Unable to load from a CDN");
 }
 
 async function jsonFromPublicCDN(path: string): Promise<unknown> {
-  if (canLoadSpecProtocol()) {
-    return fetch(`spec://localhost/${path}.json`).then((res) => res.json());
-  }
-
-  return exponentialBackoff(
-    {
-      attemptTimeout: 1000,
-      baseDelay: 500,
-      maxRetries: 5,
-      jitter: 100,
-    },
-    () => fetch(cdnUrlFactory(path, "json")).then((res) => res.json()),
-  );
+  return fetch(`spec://localhost/${path}.json`).then((res) => res.json());
 }
 
 // TODO: this is a problem for diff-versioned specs
